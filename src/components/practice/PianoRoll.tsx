@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { Grade } from '../../lib/db'
-import type { PracticeEngine } from '../../lib/engine'
+import type { PitchPoint, PracticeEngine } from '../../lib/engine'
 import { isBlackKey, noteName, type NoteNaming } from '../../lib/music'
 
 export const GRADE_COLOR: Record<Grade, string> = { good: '#6ef0c2', ok: '#f2d3a6', flat: '#52b8ff', sharp: '#ff9f5a', silent: '#7d86bd' }
@@ -23,6 +23,37 @@ const C = {
 }
 
 const GUTTER = 44
+
+/**
+ * One Euro filter (Casiez et al. 2012) over the pitch history, in semitones. Holding a note it
+ * smooths heavily (jitter vanishes, vibrato becomes a gentle wave); when the pitch moves fast,
+ * as on a note change, the cutoff rises so the line follows without lag.
+ */
+function smoothTrail(history: PitchPoint[], minCutoff = 1, beta = 0.25, dCutoff = 1): (number | null)[] {
+  const alpha = (cutoff: number, dt: number) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt))
+  const out: (number | null)[] = []
+  let x = 0
+  let dx = 0
+  let lastT = -1
+  for (const p of history) {
+    if (p.midi === null) {
+      lastT = -1
+      out.push(null)
+      continue
+    }
+    if (lastT < 0 || p.t - lastT > 0.15) {
+      x = p.midi
+      dx = 0
+    } else {
+      const dt = Math.max(1e-3, p.t - lastT)
+      dx += alpha(dCutoff, dt) * ((p.midi - x) / dt - dx)
+      x += alpha(minCutoff + beta * Math.abs(dx), dt) * (p.midi - x)
+    }
+    lastT = p.t
+    out.push(x)
+  }
+  return out
+}
 
 export default function PianoRoll({
   getEngine,
@@ -164,37 +195,43 @@ export default function PianoRoll({
         }
       }
 
-      // Pitch trail.
+      // Pitch trail: smoothed for display only, drawn as one continuous curve per sung phrase.
       const now = e.player.ctx.currentTime
       const ppsec = ppb * 1.25
       const colorOf = (c: number | null) => (c === null ? C.free : Math.abs(c) <= tol ? C.tune : c < 0 ? C.flat : C.sharp)
+      const smooth = smoothTrail(e.history)
       ctx.lineWidth = 3
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
-      let prev: { x: number; y: number; m: number; t: number } | null = null
-      for (const p of e.history) {
-        if (p.midi === null) {
-          prev = null
-          continue
-        }
-        const x = wait ? playheadX - (now - p.t) * ppsec : xOf(p.beat)
-        if (x < GUTTER - 4 || x > w) {
-          prev = null
-          continue
-        }
-        const m = foldMidi(p.midi)
-        const y = yOf(m) + rowH / 2
-        if (prev && Math.abs(prev.m - m) < 1.5 && p.t - prev.t < 0.12) {
-          ctx.strokeStyle = colorOf(p.cents)
-          ctx.shadowColor = ctx.strokeStyle
-          ctx.shadowBlur = 8
+      ctx.shadowBlur = 8
+      let run: { x: number; y: number; color: string }[] = []
+      const flush = () => {
+        for (let i = 1; i < run.length; i++) {
+          const a = run[i - 1]
+          const b = run[i]
+          const prevMid = i > 1 ? { x: (run[i - 2].x + a.x) / 2, y: (run[i - 2].y + a.y) / 2 } : a
+          const mid = i < run.length - 1 ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : b
+          ctx.strokeStyle = a.color
+          ctx.shadowColor = a.color
           ctx.beginPath()
-          ctx.moveTo(prev.x, prev.y)
-          ctx.lineTo(x, y)
+          ctx.moveTo(prevMid.x, prevMid.y)
+          ctx.quadraticCurveTo(a.x, a.y, mid.x, mid.y)
           ctx.stroke()
         }
-        prev = { x, y, m, t: p.t }
+        run = []
       }
+      let lastT = -1
+      e.history.forEach((p, i) => {
+        const m = smooth[i]
+        const x = wait ? playheadX - (now - p.t) * ppsec : xOf(p.beat)
+        if (m === null || x < GUTTER - 4 || x > w || (lastT >= 0 && p.t - lastT > 0.15)) flush()
+        lastT = p.t
+        if (m === null || x < GUTTER - 4 || x > w) return
+        // Shift the deviation by the same amount the smoothing moved the pitch, so colour and line agree.
+        const cents = p.cents === null || p.midi === null ? null : p.cents + (m - p.midi) * 100
+        run.push({ x, y: yOf(foldMidi(m)) + rowH / 2, color: colorOf(cents) })
+      })
+      flush()
       ctx.shadowBlur = 0
       ctx.restore()
 
@@ -206,10 +243,11 @@ export default function PianoRoll({
       ctx.fillStyle = grad
       ctx.fillRect(playheadX - 1, 0, 2, h)
       const sung = e.live.sung
-      if (sung !== null) {
-        const m = foldMidi(sung)
+      const smoothed = smooth[smooth.length - 1]
+      if (sung !== null && smoothed != null) {
+        const m = foldMidi(smoothed)
         const y = Math.max(padT, Math.min(h - padB, yOf(m) + rowH / 2))
-        const col = colorOf(e.live.cents)
+        const col = colorOf(e.live.cents === null ? null : e.live.cents + (smoothed - sung) * 100)
         ctx.fillStyle = col
         ctx.shadowColor = col
         ctx.shadowBlur = 18
