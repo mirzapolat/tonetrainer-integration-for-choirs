@@ -1,0 +1,250 @@
+import { useEffect, useRef } from 'react'
+import type { Grade } from '../../lib/db'
+import type { PracticeEngine } from '../../lib/engine'
+import { isBlackKey, noteName, type NoteNaming } from '../../lib/music'
+
+export const GRADE_COLOR: Record<Grade, string> = { good: '#6ef0c2', ok: '#f2d3a6', flat: '#52b8ff', sharp: '#ff9f5a', silent: '#7d86bd' }
+
+const C = {
+  rowDark: 'rgba(4, 8, 40, 0.35)',
+  grid: 'rgba(255,255,255,0.05)',
+  measure: 'rgba(255,255,255,0.13)',
+  label: '#6f78b5',
+  upcoming: 'rgba(201, 200, 245, 0.55)',
+  past: 'rgba(201, 200, 245, 0.22)',
+  other: 'rgba(201, 200, 245, 0.13)',
+  current: '#f2d3a6',
+  playhead: '#ffb46b',
+  tune: '#6ef0c2',
+  flat: '#52b8ff',
+  sharp: '#ff9f5a',
+  free: '#c9c8f5',
+  loop: 'rgba(63, 208, 255, 0.07)',
+}
+
+const GUTTER = 44
+
+export default function PianoRoll({
+  getEngine,
+  tolerance,
+  ignoreOctave,
+  naming,
+  onSeekVisit,
+}: {
+  getEngine: () => PracticeEngine | null
+  tolerance: number
+  ignoreOctave: boolean
+  naming: NoteNaming
+  onSeekVisit: (visit: number) => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const geom = useRef({ playheadX: 0, ppb: 80, beat: 0 })
+  const opts = useRef({ tolerance, ignoreOctave, naming })
+  opts.current = { tolerance, ignoreOctave, naming }
+
+  useEffect(() => {
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    let raf = 0
+    let w = 0
+    let h = 0
+    const ro = new ResizeObserver(() => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      w = canvas.clientWidth
+      h = canvas.clientHeight
+      canvas.width = Math.round(w * dpr)
+      canvas.height = Math.round(h * dpr)
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    })
+    ro.observe(canvas)
+
+    const draw = () => {
+      raf = requestAnimationFrame(draw)
+      const e = getEngine()
+      ctx.clearRect(0, 0, w, h)
+      if (!e || !w || !h) return
+      const { tolerance: tol, ignoreOctave: fold, naming: nm } = opts.current
+      const track = e.track
+      const tl = e.timeline
+      const wait = e.mode === 'wait'
+      const beat = wait ? (e.notes[e.waitIdx]?.startBeat ?? 0) : e.player.currentBeat()
+      const ppb = Math.max(46, Math.min(120, (w - GUTTER) / 9))
+      const playheadX = GUTTER + (w - GUTTER) * 0.28
+      geom.current = { playheadX, ppb, beat }
+      const xOf = (b: number) => playheadX + (b - beat) * ppb
+      const lo = track.low - 3
+      const hi = track.high + 3
+      const padT = 22
+      const padB = 8
+      const rowH = (h - padT - padB) / (hi - lo + 1)
+      const yOf = (m: number) => padT + (hi - m) * rowH
+      const centre = (track.low + track.high) / 2
+      const foldMidi = (m: number) => (fold ? m + 12 * Math.round((centre - m) / 12) : m)
+      const beatMin = beat - (playheadX - GUTTER) / ppb - 1
+      const beatMax = beat + (w - playheadX) / ppb + 1
+
+      // Rows and pitch labels.
+      ctx.font = '600 10px Figtree Variable, system-ui'
+      ctx.textBaseline = 'middle'
+      for (let m = lo; m <= hi; m++) {
+        const y = yOf(m)
+        if (isBlackKey(m)) {
+          ctx.fillStyle = C.rowDark
+          ctx.fillRect(GUTTER, y, w - GUTTER, rowH)
+        }
+        if (m % 12 === 0) {
+          ctx.fillStyle = C.grid
+          ctx.fillRect(GUTTER, y + rowH - 1, w - GUTTER, 1)
+        }
+        if (rowH >= 10.5 || m % 12 === 0) {
+          ctx.fillStyle = m % 12 === 0 ? '#a9b0de' : C.label
+          ctx.fillText(noteName(m, nm), 8, y + rowH / 2)
+        }
+      }
+
+      // Loop region.
+      if (e.loop) {
+        const r = e.range()
+        ctx.fillStyle = C.loop
+        ctx.fillRect(Math.max(GUTTER, xOf(r.startBeat)), 0, xOf(r.endBeat) - Math.max(GUTTER, xOf(r.startBeat)), h)
+      }
+
+      // Measures.
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(GUTTER, 0, w - GUTTER, h)
+      ctx.clip()
+      ctx.textBaseline = 'top'
+      for (const v of tl.visits) {
+        if (v.startBeat > beatMax) break
+        if (v.startBeat + v.lengthQ < beatMin) continue
+        const x = xOf(v.startBeat)
+        ctx.fillStyle = C.measure
+        ctx.fillRect(x, padT - 4, 1, h)
+        ctx.fillStyle = C.label
+        ctx.fillText(v.number, x + 4, 5)
+      }
+
+      // Other voices, faint.
+      for (const t of tl.tracks) {
+        if (t.id === track.id) continue
+        ctx.fillStyle = C.other
+        for (const n of t.notes) {
+          if (n.startBeat > beatMax) break
+          if (n.startBeat + n.durBeats < beatMin || n.midi < lo || n.midi > hi) continue
+          ctx.fillRect(xOf(n.startBeat), yOf(n.midi) + rowH * 0.4, n.durBeats * ppb - 2, Math.max(2, rowH * 0.2))
+        }
+      }
+
+      // Own notes.
+      const target = e.live.target
+      for (const n of track.notes) {
+        if (n.startBeat > beatMax) break
+        if (n.startBeat + n.durBeats < beatMin) continue
+        const x = xOf(n.startBeat)
+        const bw = Math.max(4, n.durBeats * ppb - 3)
+        const y = yOf(n.midi) + rowH * 0.14
+        const bh = Math.max(5, rowH * 0.72)
+        const grade = e.results[n.idx]?.grade
+        const isCurrent = target?.idx === n.idx
+        ctx.fillStyle = grade ? GRADE_COLOR[grade] : isCurrent ? C.current : n.startBeat + n.durBeats < beat ? C.past : C.upcoming
+        if (isCurrent) {
+          ctx.shadowColor = C.playhead
+          ctx.shadowBlur = 16
+        }
+        ctx.beginPath()
+        ctx.roundRect(x, y, bw, bh, Math.min(6, bh / 2))
+        ctx.fill()
+        ctx.shadowBlur = 0
+        if (n.lyric && bw > 14) {
+          ctx.fillStyle = isCurrent ? '#2a1d0b' : 'rgba(7, 13, 51, 0.8)'
+          ctx.font = `600 ${Math.min(11, bh - 2)}px Figtree Variable, system-ui`
+          ctx.textBaseline = 'middle'
+          ctx.fillText(n.lyric, x + 4, y + bh / 2, bw - 6)
+        }
+      }
+
+      // Pitch trail.
+      const now = e.player.ctx.currentTime
+      const ppsec = ppb * 1.25
+      const colorOf = (c: number | null) => (c === null ? C.free : Math.abs(c) <= tol ? C.tune : c < 0 ? C.flat : C.sharp)
+      ctx.lineWidth = 3
+      ctx.lineCap = 'round'
+      ctx.lineJoin = 'round'
+      let prev: { x: number; y: number; m: number; t: number } | null = null
+      for (const p of e.history) {
+        if (p.midi === null) {
+          prev = null
+          continue
+        }
+        const x = wait ? playheadX - (now - p.t) * ppsec : xOf(p.beat)
+        if (x < GUTTER - 4 || x > w) {
+          prev = null
+          continue
+        }
+        const m = foldMidi(p.midi)
+        const y = yOf(m) + rowH / 2
+        if (prev && Math.abs(prev.m - m) < 1.5 && p.t - prev.t < 0.12) {
+          ctx.strokeStyle = colorOf(p.cents)
+          ctx.shadowColor = ctx.strokeStyle
+          ctx.shadowBlur = 8
+          ctx.beginPath()
+          ctx.moveTo(prev.x, prev.y)
+          ctx.lineTo(x, y)
+          ctx.stroke()
+        }
+        prev = { x, y, m, t: p.t }
+      }
+      ctx.shadowBlur = 0
+      ctx.restore()
+
+      // Playhead and live dot.
+      const grad = ctx.createLinearGradient(0, 0, 0, h)
+      grad.addColorStop(0, 'rgba(255,180,107,0)')
+      grad.addColorStop(0.5, 'rgba(255,180,107,0.8)')
+      grad.addColorStop(1, 'rgba(255,180,107,0)')
+      ctx.fillStyle = grad
+      ctx.fillRect(playheadX - 1, 0, 2, h)
+      const sung = e.live.sung
+      if (sung !== null) {
+        const m = foldMidi(sung)
+        const y = Math.max(padT, Math.min(h - padB, yOf(m) + rowH / 2))
+        const col = colorOf(e.live.cents)
+        ctx.fillStyle = col
+        ctx.shadowColor = col
+        ctx.shadowBlur = 18
+        ctx.beginPath()
+        ctx.arc(playheadX, y, 6.5, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.shadowBlur = 0
+      }
+
+      // Count-in.
+      if (!wait && e.player.playing && beat < 0) {
+        ctx.fillStyle = 'rgba(242, 211, 166, 0.9)'
+        ctx.font = '600 64px Bricolage Grotesque Variable, system-ui'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(String(Math.ceil(-beat)), (w + GUTTER) / 2, h / 2)
+        ctx.textAlign = 'start'
+      }
+    }
+    raf = requestAnimationFrame(draw)
+    return () => {
+      cancelAnimationFrame(raf)
+      ro.disconnect()
+    }
+  }, [getEngine])
+
+  const onClick = (ev: React.MouseEvent<HTMLCanvasElement>) => {
+    const e = getEngine()
+    if (!e) return
+    const r = ev.currentTarget.getBoundingClientRect()
+    const { playheadX, ppb, beat } = geom.current
+    const b = beat + (ev.clientX - r.left - playheadX) / ppb
+    if (b < 0 || b > e.timeline.totalBeats) return
+    onSeekVisit(e.timeline.visitAt(b).index)
+  }
+
+  return <canvas ref={canvasRef} onClick={onClick} className="block h-full w-full cursor-pointer" aria-label="Notenrolle mit deinem Tonhöhenverlauf. Klicke, um zu einem Takt zu springen." />
+}
