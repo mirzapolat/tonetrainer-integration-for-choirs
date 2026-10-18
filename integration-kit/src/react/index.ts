@@ -1,0 +1,13 @@
+// React layer. Import './tonetrainer.css' once in the host app (or port its rules to the host's styling).
+export { default as PracticeView, useIsCompact, type PracticeViewProps } from './PracticeView'
+export { default as ProgressView, type ProgressViewProps } from './ProgressView'
+export { default as PracticeTimeChart } from './PracticeTimeChart'
+export { default as ScoreView, type ScoreHandle } from './ScoreView'
+export { default as PianoRoll } from './PianoRoll'
+export { default as Tuner } from './Tuner'
+export { default as TransportBar } from './TransportBar'
+export { MixerDialog, ResultsDialog, SettingsDialog, TrackPicker } from './dialogs'
+export { Dialog, Segmented, Slider, Switch } from './ui'
+export { usePracticeSession, presetMix, activePreset, MIX_PRESETS, type PracticeSession, type PracticeSessionOptions, type MicState, type MixPreset } from './usePracticeSession'
+export { useLocalSettings, settingsStore } from './useLocalSettings'
+export { accuracyColor, DEFAULT_COLORS, gradeColor, paperGradeColor, readColors, useTrainerColors, type TrainerColors } from './theme'
